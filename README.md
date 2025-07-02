@@ -1,1 +1,1 @@
-# intents Solver example
+# Intents Solver example
