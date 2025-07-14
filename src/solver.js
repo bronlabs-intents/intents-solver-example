@@ -35,19 +35,22 @@ export class SolverProcessor extends OrderProcessor {
     log.info(`Processing OrderStatusChanged - Order ID: ${orderId}, Status: ${status}`);
 
     switch (status) {
+      // USER_INITIATED
       case 1:
         return await this.solverReact(orderId);
-      case 4:
+
+      // WAIT_FOR_SOLVER_TX
+      case 5:
         return await this.sendSolverTransaction(orderId);
     }
   }
 
   async solverReact(orderId) {
-    const { status, baseParams, quoteParams } = await this.orderEngine.orders(orderId);
+    const { user, status, baseParams, quoteParams, pricingParams, createdAt } = await this.orderEngine.getOrder(orderId);
 
-    log.info(`Fetched details for order ${orderId}: ${status}, ${baseParams}, ${quoteParams}`);
+    log.info(`Fetched details for order ${orderId}: status=${status}, base=${baseParams}, quote=${quoteParams}, pricing=${pricingParams}`);
 
-    if (status !== 1) return;
+    if (![1, 2].includes(status)) return; // USER_INITIATED or AUCTION_IN_PROGRESS
 
     const baseNetwork = this.networks[baseParams.networkId];
     if (!baseNetwork) {
@@ -66,6 +69,11 @@ export class SolverProcessor extends OrderProcessor {
       return;
     }
 
+    if ((parseInt(createdAt, 10) + parseInt(pricingParams.auctionDuration, 10)) * 1000 < Date.now()) {
+      log.info(`Auction expired for order ${orderId}`);
+      return;
+    }
+
     /**
      * TODO:
      *   - check if solver supports these tokens
@@ -75,16 +83,19 @@ export class SolverProcessor extends OrderProcessor {
 
     log.info(`Solver reacting on order ${orderId}...`)
 
-    const tx = await this.orderEngine.solverReact(orderId, this.solverWallets[baseParams.networkId].address);
+    const price = pricingParams.maxPrice_e18;
+
+    const tx = await this.orderEngine.solverReact(orderId, this.solverWallets[baseParams.networkId].address, price, { gasLimit: 500000 });
     await tx.wait();
   }
 
   async sendSolverTransaction(orderId) {
-    const { status, solver, baseParams, quoteParams, pricingParams } = await this.orderEngine.orders(orderId);
+    const { status, solver, baseParams, quoteParams, pricingParams } = await this.orderEngine.getOrder(orderId);
 
-    log.info(`Fetched details for order ${orderId}: ${status}, ${solver}, ${baseParams}, ${quoteParams}`);
+    log.info(`Fetched details for order ${orderId}: status=${status}, solver=${solver} base=${baseParams}, quote=${quoteParams}, pricing=${pricingParams}`);
 
-    if (status !== 4) return;
+    if (status !== 5) return; // WAIT_FOR_SOLVER_TX
+
     if (solver !== this.solverAddress) return;
 
     const baseNetwork  = this.networks[baseParams.networkId];
@@ -93,15 +104,22 @@ export class SolverProcessor extends OrderProcessor {
     const baseTokenDecimals  = await baseNetwork.getDecimals(baseParams.tokenAddress);
     const quoteTokenDecimals = await quoteNetwork.getDecimals(quoteParams.tokenAddress);
 
-    const quoteAmount = BigNumber.from(pricingParams.amount)
-      .mul(BigNumber.from(pricingParams.price_e18))
-      .div(BigNumber.from(10).pow(baseTokenDecimals + 18 - quoteTokenDecimals));
+    const quoteAmount = !BigNumber.from(pricingParams.quoteAmount).isZero() ?
+      BigNumber.from(pricingParams.quoteAmount) :
+      BigNumber.from(pricingParams.baseAmount)
+        .mul(BigNumber.from(pricingParams.price_e18))
+        .div(BigNumber.from(10).pow(baseTokenDecimals + 18 - quoteTokenDecimals));
 
-    const txHash = await quoteNetwork.transfer(this.solverWallets[quoteParams.networkId].privateKey, quoteParams.recipientAddress, quoteAmount, quoteParams.tokenAddress);
+    const txHash = await quoteNetwork.transfer(
+      this.solverWallets[quoteParams.networkId].privateKey,
+      quoteParams.userAddress,
+      quoteAmount,
+      quoteParams.tokenAddress
+    );
 
-    log.info(`Sent transaction ${txHash}: ${quoteAmount.toString()} ${quoteParams.tokenAddress} to ${quoteParams.recipientAddress}`);
+    log.info(`Sent transaction ${txHash}: ${quoteAmount.toString()} ${quoteParams.tokenAddress} to ${quoteParams.userAddress}`);
 
-    const tx = await this.orderEngine.setSolverTxOnQuoteChain(orderId, txHash);
+    const tx = await this.orderEngine.setSolverTxOnQuoteNetwork(orderId, txHash, { gasLimit: 500000 });
     await tx.wait();
   }
 }
