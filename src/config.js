@@ -3,6 +3,12 @@ export const loadConfig = () => ({
   orderEngineAddress: process.env.ORDER_ENGINE_ADDRESS,
   solverPrivateKey: process.env.SOLVER_PRIVATE_KEY,
 
+  // Bron SDK
+  bronApiUrl: process.env.BRON_API_URL || 'https://api.bron.org',
+  bronApiKey: process.env.BRON_API_KEY,
+  bronWorkspaceId: process.env.BRON_WORKSPACE_ID,
+  bronAccountId: process.env.BRON_ACCOUNT_ID,
+
   startBlockOffset: 1800, // ~ 1 hour
   pollingInterval: 1500,
   retryDelay: 5000,

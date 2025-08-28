@@ -1,6 +1,7 @@
 import { BigNumber, ethers } from 'ethers';
 
-import { initNetworks, initOrderEngine, log, OrderProcessor } from '@bronlabs/intents-sdk';
+import { initNetworks, initOrderEngine, log, OrderProcessor, sleep } from '@bronlabs/intents-sdk';
+import BronClient from '@bronlabs/bron-sdk';
 
 
 export class SolverProcessor extends OrderProcessor {
@@ -27,6 +28,13 @@ export class SolverProcessor extends OrderProcessor {
         privateKey: config.networks[networkName].walletPrivateKey
       }
     }), {});
+
+    this.bronAccountId = config.bronAccountId;
+    this.bronApi = new BronClient({
+      apiKey: config.bronApiKey,
+      workspaceId: config.bronWorkspaceId,
+      baseUrl: config.bronApiUrl
+    });
 
     log.info(`Initialized Solver with networks: ${Object.keys(this.networks).join(', ')}`)
   }
@@ -110,16 +118,74 @@ export class SolverProcessor extends OrderProcessor {
         .mul(BigNumber.from(pricingParams.price_e18))
         .div(BigNumber.from(10).pow(baseTokenDecimals + 18 - quoteTokenDecimals));
 
-    const txHash = await quoteNetwork.transfer(
-      this.solverWallets[quoteParams.networkId].privateKey,
-      quoteParams.userAddress,
-      quoteAmount,
-      quoteParams.tokenAddress
-    );
+    // Resolve assetId (native vs token)
+    const assetId = await this.resolveAssetId(quoteParams.tokenAddress, quoteParams.networkId);
 
-    log.info(`Sent transaction ${txHash}: ${quoteAmount.toString()} ${quoteParams.tokenAddress} to ${quoteParams.userAddress}`);
+    // Create withdrawal via Bron API
+    const externalId = `${orderId}-solver`;
+    let withdrawal;
+    try {
+      withdrawal = await this.bronApi.transactions.createTransaction({
+        accountId: this.bronAccountId,
+        externalId,
+        transactionType: 'withdrawal',
+        params: {
+          amount: BigNumber.from(quoteAmount).toString(),
+          assetId,
+          toAddress: quoteParams.userAddress
+        }
+      });
+    } catch (e) {
+      if (e.message?.includes('already-exists')) {
+        const { transactions: [existing] } = await this.bronApi.transactions.getTransactions({
+          accountIds: [this.bronAccountId], externalId, limit: '1'
+        });
+        withdrawal = existing;
+      } else {
+        log.error(`[Critical]: Failed to create withdrawal for order ${orderId}:`, e);
+        return;
+      }
+    }
+
+    // Wait until blockchainTxId is available
+    const txHash = await this.waitForBlockchainTx(withdrawal.transactionId, orderId);
+    if (!txHash) return;
+
+    log.info(`Sent transaction ${txHash}: ${BigNumber.from(quoteAmount).toString()} ${assetId} to ${quoteParams.userAddress}`);
 
     const tx = await this.orderEngine.setSolverTxOnQuoteNetwork(orderId, txHash, { gasLimit: 500000 });
     await tx.wait();
+  }
+
+  async resolveAssetId(tokenAddress, networkId) {
+    if (tokenAddress === '0x0') {
+      const { nativeAssetId } = await this.bronApi.assets.getNetworkById(networkId);
+      return nativeAssetId;
+    }
+    const { assets: [asset] } = await this.bronApi.assets.getAssets({
+      networkIds: [networkId],
+      contractAddress: tokenAddress,
+      limit: '1'
+    });
+    return asset.assetId;
+  }
+
+  async waitForBlockchainTx(transactionId, orderId) {
+    for (let i = 0; i < 60; i++) {
+      try {
+        const w = await this.bronApi.transactions.getTransactionById(transactionId);
+        const txId = w.extra?.blockchainDetails?.[0]?.blockchainTxId;
+        if (txId) return txId;
+        if (w.terminatedAt) {
+          log.error(`[Critical]: Withdrawal terminated for order ${orderId} with status ${w.status}`);
+          return null;
+        }
+      } catch (e) {
+        log.error(`Error polling transaction ${transactionId} for order ${orderId}:`, e);
+      }
+      await sleep(2000);
+    }
+    log.error(`[Critical]: Timeout waiting for blockchain tx for order ${orderId}`);
+    return null;
   }
 }

@@ -4,10 +4,15 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "generate-keys": "npx @bronlabs/bron-sdk generate-keys"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "@bronlabs/intents-sdk": "^1.0.17",
+    "@bronlabs/bron-sdk": "^0.1.17",
     "dotenv": "^16.3.1",
     "ethers": "^5.7.2"
   }
