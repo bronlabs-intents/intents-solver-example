@@ -1,6 +1,7 @@
-import { BigNumber, ethers } from 'ethers';
+import { ethers } from 'ethers';
+import Big from 'big.js';
 
-import { initNetworks, initOrderEngine, log, OrderProcessor, sleep } from '@bronlabs/intents-sdk';
+import { initOrderEngine, expRetry, log, OrderProcessor, OrderStatus, printOrder, sleep } from '@bronlabs/intents-sdk';
 import BronClient from '@bronlabs/bron-sdk';
 
 
@@ -8,47 +9,31 @@ export class SolverProcessor extends OrderProcessor {
   constructor(config) {
     super();
 
-    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
+    const provider = new ethers.JsonRpcProvider(config.rpcUrl);
 
     const wallet = new ethers.Wallet(config.solverPrivateKey, provider);
-
-    this.solverAddress = wallet.address;
 
     this.orderEngine = initOrderEngine(
       config.orderEngineAddress,
       wallet
     );
 
-    this.networks = initNetworks(config.networks, cfg => !!cfg.walletAddress && !!cfg.walletPrivateKey);
-
-    this.solverWallets = Object.keys(this.networks).reduce((acc, networkName) => ({
-      ...acc,
-      [networkName]: {
-        address: config.networks[networkName].walletAddress,
-        privateKey: config.networks[networkName].walletPrivateKey
-      }
-    }), {});
-
-    this.bronAccountId = config.bronAccountId;
     this.bronApi = new BronClient({
       apiKey: config.bronApiKey,
-      workspaceId: config.bronWorkspaceId,
-      baseUrl: config.bronApiUrl
+      workspaceId: config.bronWorkspaceId
     });
 
-    log.info(`Initialized Solver with networks: ${Object.keys(this.networks).join(', ')}`)
+    this.bronAccountId = config.bronAccountId;
+
+    log.info(`Initialized Solver`)
   }
 
   async process(orderId, status) {
-    log.info(`Processing OrderStatusChanged - Order ID: ${orderId}, Status: ${status}`);
-
-    switch (status) {
-      // USER_INITIATED
-      case 1:
+    switch (Number(status)) {
+      case OrderStatus.USER_INITIATED:
         return await this.solverReact(orderId);
 
-      // WAIT_FOR_SOLVER_TX
-      case 5:
+      case OrderStatus.WAIT_FOR_SOLVER_TX:
         return await this.sendSolverTransaction(orderId);
     }
   }
@@ -56,44 +41,31 @@ export class SolverProcessor extends OrderProcessor {
   async solverReact(orderId) {
     const { user, status, baseParams, quoteParams, pricingParams, createdAt } = await this.orderEngine.getOrder(orderId);
 
-    log.info(`Fetched details for order ${orderId}: status=${status}, base=${baseParams}, quote=${quoteParams}, pricing=${pricingParams}`);
+    if (![OrderStatus.USER_INITIATED, OrderStatus.AUCTION_IN_PROGRESS].includes(Number(status))) return;
 
-    if (![1, 2].includes(status)) return; // USER_INITIATED or AUCTION_IN_PROGRESS
+    log.info(`Reacting on order "${orderId}", status = ${status}, ${printOrder(baseParams, quoteParams, pricingParams)}`);
 
-    const baseNetwork = this.networks[baseParams.networkId];
-    if (!baseNetwork) {
-      log.info(`Unsupported base network ${baseParams.networkId}`);
-      return;
-    }
-
-    const quoteNetwork = this.networks[quoteParams.networkId];
-    if (!quoteNetwork) {
-      log.info(`Unsupported quote network ${quoteParams.networkId}`);
-      return;
-    }
-
-    if (!this.solverWallets[baseParams.networkId]) {
-      log.info(`Solver does not have a wallet for network ${quoteParams.networkId}`);
-      return;
-    }
-
-    if ((parseInt(createdAt, 10) + parseInt(pricingParams.auctionDuration, 10)) * 1000 < Date.now()) {
+    if ((createdAt + pricingParams.auctionDuration) * 1000n < Date.now()) {
       log.info(`Auction expired for order ${orderId}`);
       return;
     }
 
-    /**
-     * TODO:
-     *   - check if solver supports these tokens
-     *   - check if solver has enough funds in wallet to pay fees and transfer tokens
-     *   - wait for target price on which solver will accept the order
-     */
+    const { addresses: [{ address: solverBaseAddress }] } = await this.bronApi.addresses.getDepositAddresses({
+      accountId: this.bronAccountId,
+      networkId: baseParams.networkId,
+      limit: '1'
+    })
 
-    log.info(`Solver reacting on order ${orderId}...`)
+    if (!solverBaseAddress) {
+      log.error(`No deposit address found for network ${baseParams.networkId}`);
+      return;
+    }
 
-    const price = pricingParams.maxPrice_e18;
+    let price = pricingParams.maxPrice_e18; // todo: replace with real logic
 
-    const tx = await this.orderEngine.solverReact(orderId, this.solverWallets[baseParams.networkId].address, price, { gasLimit: 500000 });
+    log.info(`Placing price for order ${orderId}: ${new Big(price).div(Big(10).pow(18)).toString()}`);
+
+    const tx = await this.orderEngine.solverReact(orderId, solverBaseAddress, price, { gasLimit: 500_000 });
     await tx.wait();
   }
 
@@ -140,7 +112,7 @@ export class SolverProcessor extends OrderProcessor {
         const { transactions: [existing] } = await this.bronApi.transactions.getTransactions({
           accountIds: [this.bronAccountId], externalId, limit: '1'
         });
-        withdrawal = existing;
+        withdrawal                         = existing;
       } else {
         log.error(`[Critical]: Failed to create withdrawal for order ${orderId}:`, e);
         return;
@@ -173,7 +145,7 @@ export class SolverProcessor extends OrderProcessor {
   async waitForBlockchainTx(transactionId, orderId) {
     for (let i = 0; i < 60; i++) {
       try {
-        const w = await this.bronApi.transactions.getTransactionById(transactionId);
+        const w    = await this.bronApi.transactions.getTransactionById(transactionId);
         const txId = w.extra?.blockchainDetails?.[0]?.blockchainTxId;
         if (txId) return txId;
         if (w.terminatedAt) {

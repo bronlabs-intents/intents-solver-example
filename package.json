@@ -4,16 +4,16 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "generate-keys": "npx @bronlabs/bron-sdk generate-keys"
+    "start": "node src/index.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
-    "@bronlabs/intents-sdk": "^1.0.17",
-    "@bronlabs/bron-sdk": "^0.1.17",
-    "dotenv": "^16.3.1",
-    "ethers": "^5.7.2"
+    "@bronlabs/intents-sdk": "^1.0.43",
+    "@bronlabs/bron-sdk": "^0.1.18",
+    "big.js": "^7.0.1",
+    "dotenv": "^16.3.2",
+    "ethers": "^6.15.0"
   }
 }
