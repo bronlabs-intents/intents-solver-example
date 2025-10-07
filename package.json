@@ -10,8 +10,8 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@bronlabs/intents-sdk": "^1.0.43",
-    "@bronlabs/bron-sdk": "^0.1.18",
+    "@bronlabs/intents-sdk": "^1.0.45",
+    "@bronlabs/bron-sdk": "^0.1.20",
     "big.js": "^7.0.1",
     "dotenv": "^16.3.2",
     "ethers": "^6.15.0"

@@ -116,8 +116,8 @@ export class SolverProcessor extends OrderProcessor {
         log.error(`[Critical Alert]: Solver transaction is not created for order ${orderId}:`, e);
 
         setTimeout(() => {
-          this.delayedQueue.add({ orderId, status: OrderStatus.WAIT_FOR_SOLVER_TX });
-        }, 10000);
+          this.delayedQueue.add({ orderId, status });
+        }, 15000);
 
         return;
       }
@@ -142,7 +142,7 @@ export class SolverProcessor extends OrderProcessor {
 
     const blockchainTxId = withdrawal.extra.blockchainDetails?.[0]?.blockchainTxId;
 
-    if (blockchainTxId) {
+    if (blockchainTxId && withdrawal.status === 'completed') {
       return await expRetry(async () => {
         log.info(`Sending setSolverTxOnQuoteNetwork '${blockchainTxId}' for order ${orderId}`);
 
