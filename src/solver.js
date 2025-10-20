@@ -65,8 +65,12 @@ export class SolverProcessor extends OrderProcessor {
 
     log.info(`Placing price for order ${orderId}: ${new Big(price).div(Big(10).pow(18)).toString()}`);
 
-    const tx = await this.orderEngine.solverReact(orderId, solverBaseAddress, price, { gasLimit: 500_000 });
-    await tx.wait();
+    try {
+      const tx = await this.orderEngine.solverReact(orderId, solverBaseAddress, price, { gasLimit: 500_000 });
+      await tx.wait();
+    } catch (e) {
+      log.error(`Failed to place price for order ${orderId}`, e); // skip errors here: maybe it's too late or price is too low
+    }
   }
 
   async sendSolverTransaction(orderId) {
